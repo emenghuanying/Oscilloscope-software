@@ -523,6 +523,16 @@
               <FileType>1</FileType>
               <FilePath>..\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_ll_dma2d.c</FilePath>
             </File>
+            <File>
+              <FileName>stm32f4xx_hal_dac.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_dac.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32f4xx_hal_dac_ex.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_dac_ex.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -577,6 +587,16 @@
               <FileName>osc_ui.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Oscilloscope\osc\osc_ui.c</FilePath>
+            </File>
+            <File>
+              <FileName>myiic.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Oscilloscope\osc\myiic.c</FilePath>
+            </File>
+            <File>
+              <FileName>osc_time.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Oscilloscope\osc\osc_time.c</FilePath>
             </File>
           </Files>
         </Group>

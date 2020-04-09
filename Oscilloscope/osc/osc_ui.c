@@ -27,7 +27,22 @@
 #include "string.h"
 #include "math.h"
 #include "display_dev.h"
+#include "main.h"
+#include "myiic.h"
+
 int sce_cof(void);
+void low_level_gpio_config(void);
+void TIM_PWM_Init(void);
+void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim);
+
+TIM_HandleTypeDef TIM_Handle; 
+TIM_OC_InitTypeDef TIM_OC_Handle; 
+void DAC1_Init(void);
+void EXTI_Init(void);
+void DAC_Update(unsigned short volA,unsigned short B,unsigned short C,unsigned short D);
+void set_scan_time(unsigned int index);
+void osc_create_ch1_a(void);
+
 /* Private includes ----------------------------------------------------------*/
 FOS_INODE_REGISTER("osc_ui",osc_create_ui,sce_cof,0,1);
 /* define win */
@@ -54,7 +69,9 @@ widget_def ch6_icon;
 widget_def ch7_icon;
 widget_def ch8_icon;
 /* gui dev */
-static gui_dev_def * dev;
+gui_dev_def * dev;
+
+static unsigned short oac[4] = {1870,2000,0,270};
 #if 0
 void draw_hz(const char * hzd,unsigned short x,unsigned short y);
 const char * find_hz(char * da);
@@ -78,7 +95,7 @@ int osc_create_ui(void)
 		win_group4.msg.x_size = win_group1.msg.x_size;
 		win_group4.msg.y_size = 62;
 		win_group4.dev = dev;
-		//win_group4.msg.wflags = GUI_HIDE;
+		win_group4.msg.wflags = GUI_HIDE;
 		/* set callback */
 		win_group4.draw = osc_group_draw;
 		/* create */
@@ -89,14 +106,14 @@ int osc_create_ui(void)
 		win_group5.msg.x_size = win_group1.msg.x_size;
 		win_group5.msg.y_size = 62;
 		win_group5.dev = dev;
-		//win_group5.msg.wflags = GUI_HIDE;
+		win_group5.msg.wflags = GUI_HIDE;
 		/* set callback */
 		win_group5.draw = osc_group_draw;
 		/* create */
 		gui_win_creater(&win_group5);			
 	}
 	/* create the menu win ui */
-  osc_calculate_menu_size(dev,&win_menu,osc_menu_win_draw,0);
+  osc_calculate_menu_size(dev,&win_menu,osc_menu_win_draw,GUI_HIDE);
 	/* btn */
   osc_calculate_btn_size(dev,&win_menu,btn,sizeof(btn) / sizeof(btn[0]));
 	/* create icon ch1 */
@@ -156,6 +173,17 @@ int osc_create_ui(void)
 	ch8_icon.parent = &win_group1;
 	gui_widget_creater(&ch8_icon);
 	
+	low_level_gpio_config();
+	TIM_PWM_Init();
+	HAL_TIM_PWM_MspInit(&TIM_Handle);	
+	DAC1_Init();
+	
+	IIC_Init();
+	
+	DAC_Update(oac[0],oac[1],oac[2],oac[3]);
+	
+	EXTI_Init();
+	osc_create_ch1_a();
 	/* return */
 	return FS_OK;
 }
@@ -164,6 +192,7 @@ static void osc_main_draw(window_def * win)
 {
 	/* create lisn */
 	create_grid_data(win->dev);
+	osc_create_ch1_a();
 	/* end if data */
 }
 /* draw group */
@@ -194,10 +223,36 @@ void draw_hz(const char * hzd,unsigned short x,unsigned short y)
 }
 #endif
 
+extern const unsigned char CH1_ARROW[480];
+
+/* create icon */
+void osc_create_ch1_a(void)
+{
+	/* color tmp */
+	unsigned short * color = (unsigned short *)CH1_ARROW;
+	/* widget pos */
+	unsigned short pos_x = 0;
+	unsigned short pos_y = 266 - 6;
+	/* create */
+	for( int i = 0 ; i < 12 ; i ++ )
+	{
+		for( int j = 0 ; j < 20 ; j ++ )
+		{
+#ifndef _VC_SIMULATOR_
+			dev->set_point(pos_x + j , pos_y + i , color[i*20+j]);
+#else
+			unsigned short tm = color[i*32+j];
+
+			widget->dev->set_point(parent_x + pos_x + j , parent_y + pos_y + i , RGB((tm&0xF100) >> 8 ,(tm&0x7E0) >> 3 , (tm&0x1F) << 3 ));
+#endif
+		}
+	}
+}
+
 draw_area_def * get_draw_area_msg(void);
 void gui_test(void);
 	
-FOS_TSK_REGISTER(gui_test,PRIORITY_0,100);
+FOS_TSK_REGISTER(gui_test,PRIORITY_1,100);
 
 volatile unsigned int cnt_p = 0;
 
@@ -251,7 +306,13 @@ int LCD_DrawLine_ili(unsigned short x1, unsigned short y1, unsigned short x2, un
 	}
 	else
 	{
-    dev->set_point(uRow,uCol,RGB(255,255,7));
+		if( 1)//got == 0 )
+		{
+       dev->set_point(uRow,uCol,RGB(255,255,7));
+		}else
+		{
+			 dev->set_point(uRow,uCol,RGB(7,227,231));
+		}
 		osc_arr[uRow + uCol*dev->width] |= (1<<to);
 		
 		dtes = osc_arr[uRow + uCol*dev->width];
@@ -377,7 +438,7 @@ int sce_cof(void)
 
 unsigned short line_show[5][800];
 
-int create_sin_lines(unsigned short * dft)
+int create_sin_lines(unsigned short * dft,const signed char * dil,signed short zk)
 {
 
 	#if 0
@@ -418,22 +479,41 @@ int create_sin_lines(unsigned short * dft)
 	return 0;
 #else
 	msg_area = get_draw_area_msg();
-	double sin_x = 0;
-	/* sinx */
-	for( int i = 0 ; i < msg_area->pixel_horizontal * msg_area->num_horizontal ; i ++ )
-	{
-		 double te = sin( sin_x + parse );
-		
-     short tm = (short)( te * msg_area->pixel_vertiacl * msg_area->num_vertical / 2 ) + msg_area->pixel_vertiacl * msg_area->num_vertical / 2;
+//	double sin_x = 0;
+//	/* sinx */
+//	for( int i = 0 ; i < msg_area->pixel_horizontal * msg_area->num_horizontal ; i ++ )
+//	{
+//		 double te = sin( sin_x + parse );
+//		
+//     short tm = (short)( te * msg_area->pixel_vertiacl * msg_area->num_vertical / 2 ) + msg_area->pixel_vertiacl * msg_area->num_vertical / 2;
 
-     tm += (i%2)?5:(-5);	
+//     tm += (i%2)?5:(-5);	
+//		
+//		  dft[i] = tm;
+//		
+//		  sin_x += (6.28) / (double)(msg_area->pixel_horizontal * msg_area->num_horizontal) * 3;
+//	}
+//	
+//	parse -= 0.6;
+
+  for( int i = 0 ; i < msg_area->pixel_horizontal * msg_area->num_horizontal ; i ++ )
+	{
+		 
+		unsigned short tm = msg_area->pixel_vertiacl * msg_area->num_vertical - (float)(dil[i] + 128) / (255.0f) * msg_area->pixel_vertiacl * msg_area->num_vertical;
 		
-		  dft[i] = tm;
+		dft[i] = tm + zk;
 		
-		  sin_x += (6.28) / (double)(msg_area->pixel_horizontal * msg_area->num_horizontal) * 3;
+		if( dft[i] > msg_area->pixel_vertiacl * msg_area->num_vertical )
+		{
+			dft[i] = msg_area->pixel_vertiacl * msg_area->num_vertical;
+		}
+		
+		if( dft[i] < 0 )
+		{
+			dft[i] = 0;
+		}
 	}
-	
-	parse -= 0.6;
+
 #endif
 	
 	return 0;
@@ -498,6 +578,506 @@ void create_osc_grid_status(void)
 	}
 }
 
+void low_level_gpio_config(void)
+{
+		GPIO_InitTypeDef GPIO_Initure;
+
+		__HAL_RCC_LTDC_CLK_ENABLE();                //使能LTDC时钟
+		__HAL_RCC_GPIOA_CLK_ENABLE();
+		__HAL_RCC_GPIOB_CLK_ENABLE();               //使能GPIOB时钟
+		__HAL_RCC_GPIOC_CLK_ENABLE();
+		__HAL_RCC_GPIOD_CLK_ENABLE();
+		__HAL_RCC_GPIOF_CLK_ENABLE();               //使能GPIOF时钟
+		__HAL_RCC_GPIOG_CLK_ENABLE();               //使能GPIOG时钟
+		__HAL_RCC_GPIOH_CLK_ENABLE();               //使能GPIOH时钟
+		__HAL_RCC_GPIOI_CLK_ENABLE();               //使能GPIOI时钟
+
+		/* DIO-D0~D7 */
+		GPIO_Initure.Pin=GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13;               
+		GPIO_Initure.Mode=GPIO_MODE_INPUT;     
+		GPIO_Initure.Pull=GPIO_PULLUP;                  
+		GPIO_Initure.Speed=GPIO_SPEED_HIGH;         
+		HAL_GPIO_Init(GPIOC,&GPIO_Initure);	
+		/* full0 */
+		GPIO_Initure.Pin=GPIO_PIN_9;
+		HAL_GPIO_Init(GPIOF,&GPIO_Initure);	
+		
+		GPIO_Initure.Pin=GPIO_PIN_0;
+		HAL_GPIO_Init(GPIOA,&GPIO_Initure);	
+
+		GPIO_Initure.Pin=GPIO_PIN_8;
+		HAL_GPIO_Init(GPIOH,&GPIO_Initure);
+
+		GPIO_Initure.Pin=GPIO_PIN_12;
+		HAL_GPIO_Init(GPIOB,&GPIO_Initure);	
+		
+		/* KEY RUN and AUTO */
+		GPIO_Initure.Pin=GPIO_PIN_7;
+		HAL_GPIO_Init(GPIOF,&GPIO_Initure);	
+		
+		GPIO_Initure.Pin=GPIO_PIN_2;
+		HAL_GPIO_Init(GPIOA,&GPIO_Initure);	
+		
+		HAL_GPIO_WritePin(GPIOF,GPIO_PIN_7,GPIO_PIN_SET);
+		HAL_GPIO_WritePin(GPIOA,GPIO_PIN_2,GPIO_PIN_SET);
+		
+		GPIO_Initure.Pin=GPIO_PIN_1;
+		HAL_GPIO_Init(GPIOC,&GPIO_Initure);			
+		/* output */		
+    /*--------------------------------------------------------------*/		
+		/* OE0 */
+//		GPIO_Initure.Pin=GPIO_PIN_7;
+//		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP; 
+//		HAL_GPIO_Init(GPIOB,&GPIO_Initure);
+//		/* OE1 */
+//		GPIO_Initure.Pin=GPIO_PIN_1;
+//		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP;
+//		HAL_GPIO_Init(GPIOC,&GPIO_Initure);		
+//		/* OE2 OE3 */
+//		GPIO_Initure.Pin=GPIO_PIN_7|GPIO_PIN_13;
+//		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP;
+//		HAL_GPIO_Init(GPIOD,&GPIO_Initure);
+
+//		HAL_GPIO_WritePin(GPIOB,GPIO_PIN_7,GPIO_PIN_SET);
+//		HAL_GPIO_WritePin(GPIOC,GPIO_PIN_1,GPIO_PIN_SET);
+//		HAL_GPIO_WritePin(GPIOD,GPIO_PIN_7|GPIO_PIN_13,GPIO_PIN_SET);
+		/*---------------------------------------------------------------*/
+		/* RST */
+		GPIO_Initure.Pin=GPIO_PIN_1;
+		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP; 
+		HAL_GPIO_Init(GPIOB,&GPIO_Initure);	
+
+		HAL_GPIO_WritePin(GPIOB,GPIO_PIN_1,GPIO_PIN_SET);
+		/*--------------------------------------------------------------*/
+		/* TR */
+    GPIO_Initure.Pin=GPIO_PIN_7;
+		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP; 
+		HAL_GPIO_Init(GPIOA,&GPIO_Initure);	
+
+		HAL_GPIO_WritePin(GPIOA,GPIO_PIN_7,GPIO_PIN_SET);
+		/* R0 R1 */
+    GPIO_Initure.Pin=GPIO_PIN_11|GPIO_PIN_8;
+		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP; 
+		HAL_GPIO_Init(GPIOI,&GPIO_Initure);	
+		
+		/* R2 */
+    GPIO_Initure.Pin=GPIO_PIN_15;
+		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP; 
+		HAL_GPIO_Init(GPIOB,&GPIO_Initure);		
+    
+		/* R3 */
+    GPIO_Initure.Pin=GPIO_PIN_3;
+		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP; 
+		HAL_GPIO_Init(GPIOG,&GPIO_Initure);	 
+		
+		HAL_GPIO_WritePin(GPIOI,GPIO_PIN_11|GPIO_PIN_8,GPIO_PIN_SET);
+		HAL_GPIO_WritePin(GPIOB,GPIO_PIN_15,GPIO_PIN_SET);
+		HAL_GPIO_WritePin(GPIOG,GPIO_PIN_3,GPIO_PIN_SET);
+		
+		/*------------------------------------------------------------*/
+		/*DCACA B offset */
+		GPIO_Initure.Pin=GPIO_PIN_4;
+		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP; 
+		HAL_GPIO_Init(GPIOB,&GPIO_Initure);
+    
+    GPIO_Initure.Pin=GPIO_PIN_3;
+		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP; 
+		HAL_GPIO_Init(GPIOI,&GPIO_Initure);	 		
+		
+		
+		GPIO_Initure.Pin=GPIO_PIN_3;
+		HAL_GPIO_Init(GPIOA,&GPIO_Initure);
+
+		GPIO_Initure.Pin=GPIO_PIN_5;
+		HAL_GPIO_Init(GPIOB,&GPIO_Initure);
+		
+		HAL_GPIO_WritePin(GPIOI,GPIO_PIN_3,GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(GPIOB,GPIO_PIN_4 ,GPIO_PIN_RESET);
+		
+		/* CPC */
+    GPIO_Initure.Pin=GPIO_PIN_0;
+		GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP; 
+		HAL_GPIO_Init(GPIOB,&GPIO_Initure);		
+		
+		HAL_GPIO_WritePin(GPIOB,GPIO_PIN_0,GPIO_PIN_RESET);//select PWM
+		/* */
+}
+
+void delay_us(unsigned int t)
+{
+	t *=100;
+	
+	while(t--);
+}
+
+unsigned char r0_com[4096];
+unsigned char r0n_com[4096];
+
+void read_R0(signed char *data,signed char * data_n,signed char * data_2,signed char * data_2n)
+{
+	unsigned char bit_q[8];
+	
+	HAL_GPIO_WritePin(GPIOA,GPIO_PIN_7,GPIO_PIN_RESET);//TR
+	
+	//oe_select(0);
+	
+	HAL_GPIO_WritePin(GPIOI,GPIO_PIN_11,GPIO_PIN_SET);
+	
+	for( int i = 0 ; i < 4096 ; i ++ )
+	{
+		HAL_GPIO_WritePin(GPIOI,GPIO_PIN_11,GPIO_PIN_RESET);
+		delay_us(1);
+		unsigned char temp = ( GPIOC->IDR & ( 0xFF << 6 ) ) >> 6;
+		/* */
+		bit_q[7] = ( temp & ( 1 << 3 )) >> 3;
+		bit_q[6] = ( temp & ( 1 << 7 )) >> 7;
+		bit_q[5] = ( temp & ( 1 << 2 )) >> 2;
+		bit_q[4] = ( temp & ( 1 << 6 )) >> 6;
+		bit_q[3] = ( temp & ( 1 << 1 )) >> 1;
+		bit_q[2] = ( temp & ( 1 << 5 )) >> 5;
+		bit_q[1] = ( temp & ( 1 << 0 )) >> 0;
+		bit_q[0] = ( temp & ( 1 << 4 )) >> 4;
+		/*  */
+		unsigned char temp2 = ( bit_q[7] << 7 ) | 
+			                    ( bit_q[6] << 6 ) |
+													( bit_q[5] << 5 ) |
+													( bit_q[4] << 4 ) |
+													( bit_q[3] << 3 ) |
+													( bit_q[2] << 2 ) |
+													( bit_q[1] << 1 ) |
+													( bit_q[0] << 0 );
+		/* set */
+		data[i] = (signed char)temp2;
+		
+		r0_com[i] = (GPIOC->IDR & (1<<5)) ? 92:0;
+		
+		/* ------ */
+		HAL_GPIO_WritePin(GPIOI,GPIO_PIN_11,GPIO_PIN_SET);
+		delay_us(1);
+	}
+
+	/* read channel a nes */
+//	oe_select(1);
+	
+  HAL_GPIO_WritePin(GPIOI,GPIO_PIN_8,GPIO_PIN_SET);
+	
+	for( int i = 0 ; i < 4096 ; i ++ )
+	{
+		HAL_GPIO_WritePin(GPIOI,GPIO_PIN_8,GPIO_PIN_RESET);
+		delay_us(1);
+		unsigned char temp = ( GPIOC->IDR & ( 0xFF << 6 ) ) >> 6;
+		
+		unsigned char tem2 = ((temp & 0xf0) >> 4 ) | ((temp & 0x0f) << 4 );
+			
+		data_n[i] = (signed char)(tem2);
+		
+		r0n_com[i] = (GPIOC->IDR & (1<<5)) ? 92:0;
+		
+		/* ------ */
+		HAL_GPIO_WritePin(GPIOI,GPIO_PIN_8,GPIO_PIN_SET);
+		delay_us(1);
+	}
+#if 1		
+	/* read oe2 */
+//	oe_select(2);
+	
+	HAL_GPIO_WritePin(GPIOB,GPIO_PIN_15,GPIO_PIN_SET);
+	
+	for( int i = 0 ; i < 4096 ; i ++ )
+	{
+		HAL_GPIO_WritePin(GPIOB,GPIO_PIN_15,GPIO_PIN_RESET);
+		delay_us(1);
+		unsigned char temp = ( GPIOC->IDR & ( 0xFF << 6 ) ) >> 6;
+		/* set */
+		data_2[i] =(signed char)( ( temp & 0xF ) << 4 ) | ( temp >> 4 );
+		/* ------ */
+		HAL_GPIO_WritePin(GPIOB,GPIO_PIN_15,GPIO_PIN_SET);
+		delay_us(1);
+	}	
+	
+	/* read oe4 */
+//	oe_select(3);
+	
+	HAL_GPIO_WritePin(GPIOG,GPIO_PIN_3,GPIO_PIN_SET);
+	
+	for( int i = 0 ; i < 4096 ; i ++ )
+	{
+		HAL_GPIO_WritePin(GPIOG,GPIO_PIN_3,GPIO_PIN_RESET);
+		delay_us(1);
+		unsigned char temp = ( GPIOC->IDR & ( 0xFF << 6 ) ) >> 6;
+		/* */
+		bit_q[7] = ( temp & ( 1 << 3 )) >> 3;
+		bit_q[6] = ( temp & ( 1 << 7 )) >> 7;
+		bit_q[5] = ( temp & ( 1 << 2 )) >> 2;
+		bit_q[4] = ( temp & ( 1 << 6 )) >> 6;
+		bit_q[3] = ( temp & ( 1 << 1 )) >> 1;
+		bit_q[2] = ( temp & ( 1 << 5 )) >> 5;
+		bit_q[1] = ( temp & ( 1 << 0 )) >> 0;
+		bit_q[0] = ( temp & ( 1 << 4 )) >> 4;
+		/*  */
+		unsigned char temp2 = ( bit_q[7] << 7 ) | 
+			                    ( bit_q[6] << 6 ) |
+													( bit_q[5] << 5 ) |
+													( bit_q[4] << 4 ) |
+													( bit_q[3] << 3 ) |
+													( bit_q[2] << 2 ) |
+													( bit_q[1] << 1 ) |
+													( bit_q[0] << 0 );
+		/* set */
+		data_2n[i] = (signed char)temp2;
+		/* ------ */
+		HAL_GPIO_WritePin(GPIOG,GPIO_PIN_3,GPIO_PIN_SET);
+		delay_us(1);
+	}	
+#endif
+}
+
+
+void TIM_PWM_Init(void)
+{
+	    TIM_Handle.Channel = HAL_TIM_ACTIVE_CHANNEL_1;
+	    TIM_Handle.Instance = TIM1; 
+	    TIM_Handle.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1; 
+	    TIM_Handle.Init.CounterMode = TIM_COUNTERMODE_UP; 
+	    TIM_Handle.Init.Period = 1; 
+	    TIM_Handle.Init.Prescaler = 600-1;//5; //500us
+    	HAL_TIM_PWM_Init(&TIM_Handle);
+	
+	   
+	    TIM_OC_Handle.OCMode = TIM_OCMODE_PWM1; 
+	    TIM_OC_Handle.OCPolarity = TIM_OCPOLARITY_HIGH; 
+	    TIM_OC_Handle.Pulse = 1;
+	    HAL_TIM_PWM_ConfigChannel(&TIM_Handle, &TIM_OC_Handle, TIM_CHANNEL_1); 
+	
+	    HAL_TIM_PWM_Start(&TIM_Handle, TIM_CHANNEL_1);
+	
+//	   TIM_HandleTypeDef TIM_Handle_TIM2;
+//	
+//	    TIM_Handle_TIM2.Channel = HAL_TIM_ACTIVE_CHANNEL_2;
+//	    TIM_Handle_TIM2.Instance = TIM2; 
+//	    TIM_Handle_TIM2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1; 
+//	    TIM_Handle_TIM2.Init.CounterMode = TIM_COUNTERMODE_UP; 
+//	    TIM_Handle_TIM2.Init.Period = 999; 
+//	    TIM_Handle_TIM2.Init.Prescaler = 89; 
+//    	HAL_TIM_PWM_Init(&TIM_Handle_TIM2);
+//	
+//	   
+//	    TIM_OC_Handle.OCMode = TIM_OCMODE_PWM1; 
+//	    TIM_OC_Handle.OCPolarity = TIM_OCPOLARITY_HIGH; 
+//	    TIM_OC_Handle.Pulse = 499;
+//	    HAL_TIM_PWM_ConfigChannel(&TIM_Handle_TIM2, &TIM_OC_Handle, TIM_CHANNEL_2); 
+//	
+//	    HAL_TIM_PWM_Start(&TIM_Handle_TIM2, TIM_CHANNEL_2);	   
+}
+
+void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim)
+{
+	    GPIO_InitTypeDef GPIO_Handle;
+	
+	    if(htim->Instance == TIM1)
+	    {
+		    __HAL_RCC_GPIOF_CLK_ENABLE();
+		    __HAL_RCC_TIM1_CLK_ENABLE();
+		
+		    GPIO_Handle.Pin = GPIO_PIN_8; // PF9
+		    GPIO_Handle.Mode = GPIO_MODE_AF_PP;
+		    GPIO_Handle.Pull = GPIO_PULLUP;
+		    GPIO_Handle.Speed = GPIO_SPEED_HIGH;
+		    GPIO_Handle.Alternate = GPIO_AF1_TIM1;
+		    HAL_GPIO_Init(GPIOA, &GPIO_Handle);
+	    }else if(htim->Instance == TIM2)
+			{
+		    __HAL_RCC_GPIOA_CLK_ENABLE();
+		    __HAL_RCC_TIM2_CLK_ENABLE();
+		
+		    GPIO_Handle.Pin = GPIO_PIN_1; // PF9
+		    GPIO_Handle.Mode = GPIO_MODE_AF_PP;
+		    GPIO_Handle.Pull = GPIO_PULLUP;
+		    GPIO_Handle.Speed = GPIO_SPEED_HIGH;
+		    GPIO_Handle.Alternate = GPIO_AF1_TIM1;
+		    HAL_GPIO_Init(GPIOA, &GPIO_Handle);				
+			}
+}
+signed char read_r0_data[4096];
+signed char read_r0n_data[4096];
+signed char read_r1_data[4096];
+signed char read_r1n_data[4096];
+
+signed char red_r0[8192];
+signed char red_r1[8192];
+
+signed char red_tr0[8192];
+signed char red_tr1[8192];
+
+unsigned char red_r_com[8192];
+
+
+unsigned char fls = 0;
+
+DAC_HandleTypeDef DAC1_Handler;
+
+
+void DAC1_Init(void)
+{
+    DAC_ChannelConfTypeDef DACCH1_Config;
+    
+    DAC1_Handler.Instance=DAC;
+    HAL_DAC_Init(&DAC1_Handler);  
+    
+    DACCH1_Config.DAC_Trigger=DAC_TRIGGER_NONE;   
+    DACCH1_Config.DAC_OutputBuffer=DAC_OUTPUTBUFFER_DISABLE;
+    HAL_DAC_ConfigChannel(&DAC1_Handler,&DACCH1_Config,DAC_CHANNEL_1);
+    
+    HAL_DAC_Start(&DAC1_Handler,DAC_CHANNEL_1);
+}
+
+void HAL_DAC_MspInit(DAC_HandleTypeDef* hdac)
+{      
+    GPIO_InitTypeDef GPIO_Initure;
+    __HAL_RCC_DAC_CLK_ENABLE(); 
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+	
+    GPIO_Initure.Pin=GPIO_PIN_4;
+    GPIO_Initure.Mode=GPIO_MODE_ANALOG;
+    GPIO_Initure.Pull=GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA,&GPIO_Initure);
+}
+
+void DAC1_Set_Vol(unsigned short vol)
+{
+	double temp=vol;
+	temp/=1000;
+	temp=temp*4096/3.3;
+    HAL_DAC_SetValue(&DAC1_Handler,DAC_CHANNEL_1,DAC_ALIGN_12B_R,temp);
+}
+
+void dac_out(void)
+{
+	//double te = sin( sin_x + parse );
+	static unsigned short dac_o = 0;
+	
+	DAC1_Set_Vol(dac_o);
+	
+	dac_o += 330;
+	
+	if( dac_o >= 3300 )
+	{
+		dac_o = 0;
+	}
+}
+
+
+void DAC_Update(unsigned short volA,unsigned short B,unsigned short C,unsigned short D)
+{
+	unsigned short outA = volA,outB = B,outC = C,outD = D;
+	
+	IIC_Start();
+	
+	IIC_Send_Byte(0xC0);
+	
+	IIC_Wait_Ack();
+	
+	IIC_Send_Byte(0x40);
+
+	IIC_Wait_Ack();
+	
+	IIC_Send_Byte(0x80 | (outA&0x0f00) >>8);
+	
+	IIC_Wait_Ack();
+	
+	IIC_Send_Byte( outA & 0xff );	
+
+	IIC_Wait_Ack();	
+	
+	/* out B */
+  IIC_Send_Byte(0x42);
+
+	IIC_Wait_Ack();
+	
+	IIC_Send_Byte(0x80 | (outB&0x0f00) >>8);
+	
+	IIC_Wait_Ack();
+	
+	IIC_Send_Byte( outB & 0xff );	
+
+	IIC_Wait_Ack();		
+	
+	/* outC */
+  IIC_Send_Byte(0x44);
+
+	IIC_Wait_Ack();
+	
+	IIC_Send_Byte(0x80 | (outC&0x0f00) >>8);
+	
+	IIC_Wait_Ack();
+	
+	IIC_Send_Byte( outC & 0xff );	
+
+	IIC_Wait_Ack();	
+	/* outD */
+  IIC_Send_Byte(0x46);
+
+	IIC_Wait_Ack();
+	
+	IIC_Send_Byte(0x80 | (outD&0x0f00) >>8);
+	
+	IIC_Wait_Ack();
+	
+	IIC_Send_Byte( outD & 0xff );	
+
+	IIC_Wait_Ack();		
+/* stop */	
+	IIC_Stop();
+}
+
+void EXTI_Init(void)
+{
+    GPIO_InitTypeDef GPIO_Initure;
+    
+    __HAL_RCC_GPIOA_CLK_ENABLE();             
+    __HAL_RCC_GPIOF_CLK_ENABLE();             
+  
+    
+    GPIO_Initure.Pin=GPIO_PIN_1;                
+    GPIO_Initure.Mode=GPIO_MODE_IT_RISING;     
+    GPIO_Initure.Pull=GPIO_PULLDOWN;
+    HAL_GPIO_Init(GPIOA,&GPIO_Initure);
+    
+    GPIO_Initure.Pin=GPIO_PIN_6;                
+    GPIO_Initure.Mode=GPIO_MODE_IT_RISING;      
+    GPIO_Initure.Pull=GPIO_PULLDOWN;
+    HAL_GPIO_Init(GPIOF,&GPIO_Initure);
+   
+//	  GPIO_Initure.Pin=GPIO_PIN_2;  
+//	  HAL_GPIO_Init(GPIOD,&GPIO_Initure);
+	
+	  
+    HAL_NVIC_SetPriority(EXTI1_IRQn,0,0);       
+    HAL_NVIC_EnableIRQ(EXTI1_IRQn);            
+  
+//    HAL_NVIC_SetPriority(EXTI2_IRQn,0,0);       
+//    HAL_NVIC_EnableIRQ(EXTI2_IRQn); 
+
+    HAL_NVIC_SetPriority(EXTI9_5_IRQn,0,0);       
+    HAL_NVIC_EnableIRQ(EXTI9_5_IRQn); 
+
+//    HAL_NVIC_SetPriority(EXTI15_10_IRQn,0,0);  
+//    HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);        
+}
+
+
+FOS_TSK_REGISTER(dac_out,PRIORITY_0,1);
+
+unsigned char t_flag = 0;
+
+volatile unsigned int int_cnt0 = 7;//500us
+volatile unsigned int rota_0_time_cnt = 100;
+
+unsigned char rota_flag = 0;
+
+unsigned int cnt_rodd = 0;
+
+unsigned char flg = 0;
 
 void gui_test(void)
 {
@@ -508,22 +1088,181 @@ void gui_test(void)
 	
 	//dev->fill_color(msg_area->start_pos_x,msg_area->start_pos_y,msg_area->stop_pos_x,msg_area->stop_pos_y,&gram[800*480]);
 	
-	if( cnt_p >= 2 )
+	if( (!(GPIOF->IDR & (1<<6))) && (!(GPIOA->IDR & (1<<1))) )
+	{
+		rota_flag = 0;
+		
+		if( flg == 0 )
+		{
+		  set_scan_time(int_cnt0);
+			flg = 1;
+		}
+		
+	}
+			
+  static unsigned short la[4];
+	
+	if( la[0] !=  oac[0] || la[1] !=  oac[1] || la[2] !=  oac[2] || la[3] !=  oac[3] )
+	{
+		DAC_Update(oac[0],oac[1],oac[2],oac[3]);
+	}
+		
+	la[0] = oac[0];
+	la[1] = oac[1];
+	la[2] = oac[2];
+	la[3] = oac[3];
+	
+//  DAC1_Set_Vol(3300/2);	
+	
+ if( !(GPIOF->IDR & (1<<9) ))
+ {
+	
+  HAL_TIM_PWM_Stop(&TIM_Handle, TIM_CHANNEL_1);
+	 
+	read_R0(read_r0_data ,read_r0n_data, read_r1_data , read_r1n_data );	
+	
+	unsigned short td = 0; 
+	
+//	unsigned int trig_index_1 = 0, trig_index_0 = 0;
+
+//	for( int i = 0 ; i < 3000 ; i ++ )
+//	{
+//		if( (r0_com[i] == 0 ) && ( r0_com[i+1] == 1 ) )
+//		{
+//			td = i;
+//			break;
+//		}
+//	}	 
+	 
+	 
+	if( fls == 0 )
+	{
+		for( int i = 0 ; i < 1600 ; i ++  )
+		{
+			if( (i % 2) == 1 )
+			{			
+				red_r0[i] = read_r0_data[td];
+				red_r1[i] = read_r1_data[td];
+				red_r_com[i] = r0_com[td];
+				td ++;
+			}
+			else
+			{
+				red_r0[i] = read_r0n_data[td];
+				red_r1[i] = read_r1n_data[td];
+				red_r_com[i] = r0n_com[td];
+			}
+		}		
+ }
+ else
+ {
+	
+	td = 0;
+	
+  for( int i = 0 ; i < 8190 ; i ++  )
+  {
+		if( (i % 2) == 0 )
+		{			
+		  red_r0[i] = read_r0_data[td];
+			red_r1[i] = read_r1_data[td];
+			red_r_com[i] = r0_com[td];
+		}
+		else
+		{
+			red_r0[i] = read_r0n_data[td];
+			red_r1[i] = read_r1n_data[td];
+			red_r_com[i] = r0n_com[td];
+			td ++;
+		}
+	}	
+ }
+ 
+// for( int i = 0 ; i < 750/15 ; i ++)
+// {
+//	 for( int j = 0 ; j < 15 ; j ++ )
+//	 {
+//		 red_tr0[i*15+j] = red_r0[i];
+//		 red_tr1[i*15+j] = red_r1[i];
+//	 }
+// }
+ 
+ unsigned int pos_r = 375;
+ 
+ 	for( int i = 375 ; i < 8192-375 ; i ++ )
+	{
+		if( (red_r_com[i] == 0 ) && ( red_r_com[i+1] == 92 ) )
+		{
+			pos_r = i;
+			break;
+		}
+	}	
+ 
+	if( cnt_p >= 2  )
 	{
 		hide_line(line_show[cnt_p%2],cnt_p%2);
+		//hide_line(line_show[1],1);
+		//hide_line(line_show[2],2);
 	}
 	
-	create_sin_lines(line_show[cnt_p%2]);
+	create_sin_lines(line_show[cnt_p%2],&red_r0[pos_r-375+5],cnt_p%2);
 	
 	show_line(line_show[cnt_p%2],cnt_p%2);
-	
+
 	cnt_p++;
+	
+//	create_sin_lines(line_show[1],&red_r1[pos_r-375+5],100);
+
+//	show_line(line_show[1],1);
+
+	if( GPIOC->IDR & (1<<1))
+	{
+		fls = 1;
+	}
+	else
+	{
+		fls = 0;
+	}
+	
+	/*-------------------------------*/
+	HAL_GPIO_WritePin(GPIOA,GPIO_PIN_7,GPIO_PIN_SET);
+	/*-------------------------------*/
+	//delay_us(1000);
+  /* ------------------------------- */
+	HAL_TIM_PWM_Start(&TIM_Handle, TIM_CHANNEL_1);
+  }
 }
 
+void EXTI1_IRQHandler(void)
+{
+	HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_1);
 
+	if( rota_flag == 0 )
+	{
+		if( int_cnt0 < 10 )
+		{
+		  int_cnt0++;
+			flg = 0;
+		}
+		
+		rota_flag  = 1;
+	}
+}
 
-
-
+void EXTI9_5_IRQHandler(void)
+{
+	 HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_6);//调用中断处理公用函数
+	
+	 if( rota_flag == 0 )
+	 {  
+		  if( int_cnt0 > 0 )
+			{
+			  int_cnt0--;
+				flg = 0;
+			}
+			
+		  rota_flag = 1;
+	 }
+}
 
 
 
